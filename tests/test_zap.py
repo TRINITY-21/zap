@@ -1,8 +1,10 @@
 """Tests for zap."""
 
 import asyncio
+import os
+import tempfile
 import pytest
-from zap import run, run_async, Result, ZapError
+from zap import run, run_async, Result, ZapError, which, cd
 
 
 # --- Basic ---
@@ -145,3 +147,109 @@ def test_async_stdin():
         r = await run_async("cat", stdin="async stdin")
         assert str(r) == "async stdin"
     asyncio.run(_test())
+
+
+# --- Live output ---
+
+def test_live_captures_stdout(capsys):
+    r = run("echo live test", live=True)
+    assert "live test" in r.stdout
+    captured = capsys.readouterr()
+    assert "live test" in captured.out
+
+
+def test_live_captures_stderr(capsys):
+    r = run("echo err >&2 && exit 0", live=True, check=False)
+    assert "err" in r.stderr
+
+
+def test_live_with_multiline(capsys):
+    r = run("printf 'line1\\nline2\\nline3\\n'", live=True)
+    assert r.lines == ["line1", "line2", "line3"]
+    captured = capsys.readouterr()
+    assert "line1" in captured.out
+    assert "line3" in captured.out
+
+
+def test_live_timeout():
+    with pytest.raises(TimeoutError):
+        run("sleep 10", live=True, timeout=0.2)
+
+
+def test_live_stdin():
+    r = run("cat", stdin="piped in", live=True)
+    assert "piped in" in r.stdout
+
+
+# --- which ---
+
+def test_which_finds_echo():
+    path = which("echo")
+    assert path is not None
+
+
+def test_which_returns_none_for_missing():
+    assert which("definitely_not_a_real_command_xyz") is None
+
+
+def test_which_finds_python():
+    path = which("python3") or which("python")
+    assert path is not None
+
+
+# --- cd ---
+
+def test_cd_changes_directory():
+    original = os.getcwd()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        real_tmpdir = os.path.realpath(tmpdir)
+        with cd(tmpdir):
+            assert os.path.realpath(os.getcwd()) == real_tmpdir
+        assert os.getcwd() == original
+
+
+def test_cd_restores_on_error():
+    original = os.getcwd()
+    try:
+        with cd("/tmp"):
+            raise ValueError("boom")
+    except ValueError:
+        pass
+    assert os.getcwd() == original
+
+
+def test_cd_with_run():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with cd(tmpdir):
+            r = run("pwd")
+            assert tmpdir in str(r)
+
+
+# --- Retry ---
+
+def test_retry_succeeds_eventually():
+    # Create a file-based counter: fail first 2 times, succeed on 3rd
+    with tempfile.TemporaryDirectory() as tmpdir:
+        counter = os.path.join(tmpdir, "count")
+        cmd = (
+            f"if [ -f {counter} ]; then "
+            f"  c=$(cat {counter}); "
+            f"  echo $((c+1)) > {counter}; "
+            f"else "
+            f"  echo 1 > {counter}; "
+            f"fi; "
+            f"c=$(cat {counter}); "
+            f"[ \"$c\" -ge 3 ] && echo success || exit 1"
+        )
+        r = run(cmd, retries=3, delay=0.1)
+        assert str(r) == "success"
+
+
+def test_retry_exhausted_raises():
+    with pytest.raises(ZapError):
+        run("exit 1", retries=2, delay=0.1)
+
+
+def test_no_retry_by_default():
+    with pytest.raises(ZapError):
+        run("exit 1")

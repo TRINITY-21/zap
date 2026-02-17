@@ -4,6 +4,8 @@
 
 **Python subprocess, but actually nice.**
 
+[![PyPI](https://img.shields.io/pypi/v/zap-sh?style=flat-square&color=blue)](https://pypi.org/project/zap-sh/)
+[![Downloads](https://img.shields.io/pypi/dm/zap-sh?style=flat-square&color=green)](https://pypi.org/project/zap-sh/)
 ![Python](https://img.shields.io/badge/Python-3.8+-3776AB?style=flat-square&logo=python&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)
 ![Zero Dependencies](https://img.shields.io/badge/Dependencies-Zero-orange?style=flat-square)
@@ -37,7 +39,7 @@ pip install zap-sh
 ```python
 from zap import run
 
-# Run a command
+# Run a command — returns a Result object
 result = run("git status")
 print(result.stdout)   # raw stdout
 print(result.ok)       # True if exit code 0
@@ -54,6 +56,65 @@ print(run("ls -la"))
 # Pipe with strings — clean and simple
 result = run("cat logs.txt") | "grep ERROR" | "wc -l"
 print(result)  # number of error lines
+```
+
+## Live Output
+
+See output in real-time while still capturing it. No more staring at a blank screen during `pip install` or `docker build`.
+
+```python
+# Stream output live to terminal — still captured in result
+result = run("pip install flask", live=True)
+
+# Works with long builds too
+run("docker build -t myapp .", live=True)
+run("make all", live=True)
+```
+
+## Retry
+
+Automatically retry flaky commands — network calls, API requests, CI scripts.
+
+```python
+# Retry up to 3 times with 2s delay between attempts
+result = run("curl -f https://api.example.com/health", retries=3, delay=2)
+
+# Only retries on failure (non-zero exit) — succeeds immediately if ok
+run("flaky-deploy-script.sh", retries=5, delay=5)
+```
+
+## Check If a Command Exists
+
+```python
+from zap import which
+
+# Returns the path if found, None if not
+if which("docker"):
+    run("docker ps")
+else:
+    print("Docker not installed")
+
+# Great for setup scripts
+for cmd in ["git", "node", "python3"]:
+    path = which(cmd)
+    print(f"{cmd}: {path or 'NOT FOUND'}")
+```
+
+## Temporary Directory
+
+```python
+from zap import cd
+
+# Change directory temporarily — auto-restores when done
+with cd("/my/project"):
+    run("git status")
+    run("npm install")
+    run("npm run build")
+# Back to original directory here
+
+# Safe even if something errors
+with cd("/tmp"):
+    run("some-command")  # if this fails, directory still restores
 ```
 
 ## Error Handling
@@ -118,13 +179,29 @@ Same API as `run()` — just `await` it.
 | `bool(r)` | `bool` | Returns `.ok` |
 | `r \| "cmd"` | `Result` | Pipe stdout to next command |
 
+## `run()` Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `command` | `str \| list` | *required* | Command to run |
+| `check` | `bool` | `True` | Raise `ZapError` on non-zero exit |
+| `timeout` | `float` | `None` | Timeout in seconds |
+| `cwd` | `str` | `None` | Working directory |
+| `env` | `dict` | `None` | Extra env vars (merged with `os.environ`) |
+| `stdin` | `str` | `None` | String to feed as stdin |
+| `live` | `bool` | `False` | Stream output in real-time |
+| `retries` | `int` | `0` | Number of retry attempts on failure |
+| `delay` | `float` | `1.0` | Seconds between retries |
+
 ## How It Works
 
 - **String command** → runs with `shell=True` (convenience for scripting)
 - **List command** → runs with `shell=False` (safe, no shell injection)
 - **check=True** by default → raises `ZapError` on non-zero exit
+- **live=True** → uses `Popen` with `selectors` for real-time streaming
+- **retries** → catches failures and retries with configurable delay
 - **Zero dependencies** → pure Python stdlib
-- **~200 lines** → read the whole source in 5 minutes
+- **~300 lines** → read the whole source in 5 minutes
 
 ## Support
 

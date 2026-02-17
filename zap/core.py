@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
+import shutil
 import subprocess
-from typing import Any, Dict, List, Optional, Union
+import sys
+import time
+from typing import Any, Dict, Generator, List, Optional, Union
 
 
 class ZapError(Exception):
@@ -90,6 +94,9 @@ def run(
     cwd: Optional[str] = None,
     env: Optional[Dict[str, str]] = None,
     stdin: Optional[str] = None,
+    live: bool = False,
+    retries: int = 0,
+    delay: float = 1.0,
 ) -> Result:
     """Run a shell command and return a Result.
 
@@ -100,18 +107,67 @@ def run(
         cwd: Working directory.
         env: Extra environment variables (merged with os.environ).
         stdin: String to feed as stdin.
+        live: Print output in real-time while still capturing it.
+        retries: Number of times to retry on failure (default 0).
+        delay: Seconds between retries (default 1.0).
 
     Returns:
         Result object with stdout, stderr, code, ok, lines.
 
     Raises:
-        ZapError: If check=True and command exits non-zero.
+        ZapError: If check=True and command exits non-zero (after retries).
         TimeoutError: If the command exceeds the timeout.
     """
+    last_err: Optional[Exception] = None
+
+    for attempt in range(1 + retries):
+        if attempt > 0:
+            time.sleep(delay)
+
+        try:
+            result = _run_once(
+                command, check=False, timeout=timeout, cwd=cwd,
+                env=env, stdin=stdin, live=live,
+            )
+        except TimeoutError:
+            if attempt < retries:
+                last_err = TimeoutError(
+                    f"Command timed out after {timeout}s: {command}"
+                )
+                continue
+            raise
+
+        if result.ok or not retries:
+            break
+
+        if not result.ok and attempt < retries:
+            last_err = ZapError(result)
+            continue
+
+    if check and not result.ok:
+        raise ZapError(result)
+
+    return result
+
+
+def _run_once(
+    command: Union[str, List[str]],
+    *,
+    check: bool = True,
+    timeout: Optional[float] = None,
+    cwd: Optional[str] = None,
+    env: Optional[Dict[str, str]] = None,
+    stdin: Optional[str] = None,
+    live: bool = False,
+) -> Result:
+    """Execute a single command run (no retries)."""
     use_shell = isinstance(command, str)
     full_env = None
     if env is not None:
         full_env = {**os.environ, **env}
+
+    if live:
+        return _run_live(command, use_shell, timeout, cwd, full_env, stdin)
 
     try:
         proc = subprocess.run(
@@ -129,7 +185,7 @@ def run(
             f"Command timed out after {timeout}s: {command}"
         ) from e
 
-    result = Result(
+    return Result(
         stdout=proc.stdout or "",
         stderr=proc.stderr or "",
         code=proc.returncode,
@@ -137,10 +193,78 @@ def run(
         kwargs={"check": check, "timeout": timeout, "cwd": cwd, "env": env},
     )
 
-    if check and not result.ok:
-        raise ZapError(result)
 
-    return result
+def _run_live(
+    command: Union[str, List[str]],
+    use_shell: bool,
+    timeout: Optional[float],
+    cwd: Optional[str],
+    full_env: Optional[Dict[str, str]],
+    stdin: Optional[str],
+) -> Result:
+    """Run a command with live output streaming."""
+    proc = subprocess.Popen(
+        command,
+        shell=use_shell,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        stdin=subprocess.PIPE if stdin else None,
+        cwd=cwd,
+        env=full_env,
+        text=True,
+    )
+
+    stdout_lines: List[str] = []
+    stderr_lines: List[str] = []
+
+    if stdin:
+        proc.stdin.write(stdin)  # type: ignore[union-attr]
+        proc.stdin.close()  # type: ignore[union-attr]
+
+    import selectors
+
+    sel = selectors.DefaultSelector()
+    if proc.stdout:
+        sel.register(proc.stdout, selectors.EVENT_READ)
+    if proc.stderr:
+        sel.register(proc.stderr, selectors.EVENT_READ)
+
+    start = time.monotonic()
+    open_streams = 2
+
+    while open_streams > 0:
+        if timeout and (time.monotonic() - start) > timeout:
+            proc.kill()
+            proc.wait()
+            sel.close()
+            raise TimeoutError(f"Command timed out after {timeout}s: {command}")
+
+        events = sel.select(timeout=0.1)
+        for key, _ in events:
+            line = key.fileobj.readline()  # type: ignore[union-attr]
+            if not line:
+                sel.unregister(key.fileobj)
+                open_streams -= 1
+                continue
+            if key.fileobj is proc.stdout:
+                sys.stdout.write(line)
+                sys.stdout.flush()
+                stdout_lines.append(line)
+            else:
+                sys.stderr.write(line)
+                sys.stderr.flush()
+                stderr_lines.append(line)
+
+    proc.wait()
+    sel.close()
+
+    return Result(
+        stdout="".join(stdout_lines),
+        stderr="".join(stderr_lines),
+        code=proc.returncode,
+        command=command,
+        kwargs={"timeout": timeout, "cwd": cwd},
+    )
 
 
 async def run_async(
@@ -218,3 +342,25 @@ async def run_async(
         raise ZapError(result)
 
     return result
+
+
+def which(command: str) -> Optional[str]:
+    """Check if a command exists on PATH. Returns its path or None."""
+    return shutil.which(command)
+
+
+@contextlib.contextmanager
+def cd(path: str) -> Generator[None, None, None]:
+    """Temporarily change working directory.
+
+    Usage:
+        with cd("/my/project"):
+            run("git status")
+            run("npm install")
+    """
+    prev = os.getcwd()
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(prev)
