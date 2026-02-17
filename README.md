@@ -126,6 +126,12 @@ Same API as `run()` — just `await` it.
 - **Zero dependencies** → pure Python stdlib
 - **~200 lines** → read the whole source in 5 minutes
 
+## Support
+
+If Zap saves you time, consider buying me a coffee.
+
+<a href="https://buymeacoffee.com/trinity_21" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="40"></a>
+
 ## License
 
 MIT
